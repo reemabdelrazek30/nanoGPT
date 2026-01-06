@@ -132,7 +132,8 @@ class GPTConfig:
     mup_width_multiplier: float = 1 # `mup_width_multiplier = width / base_width` where base_width is typically 256
     mup_input_alpha: float = 1 # Optional tunable multiplier applied to input embedding forward pass output
     mup_output_alpha: float = 1 # Optional tunable multiplier applied to output unembedding forward pass output
-
+    connection_layer: int = None # Optional layer index to add connection from input to this layer
+    
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -140,7 +141,8 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-
+        self.connection_layer = config.connection_layer
+        print("initializing GPT model with config layers:",config.n_layer)
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
@@ -207,8 +209,16 @@ class GPT(nn.Module):
             ### Begin muP code ###
             x *= self.config.mup_input_alpha
             ### End muP code ###
-        for block in self.transformer.h:
+        # for block in self.transformer.h:
+        #     x = block(x) 
+        connection_read = None
+        #connection_layer = 13 # 
+        for i, block in enumerate(self.transformer.h):
+            if self.connection_layer is not None and i == self.connection_layer:
+                x = x + connection_read 
             x = block(x)
+            if i == 0:
+                connection_read = x
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -237,13 +247,26 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             if hasattr(block.attn, 'bias'):
                 block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
-
+    @classmethod
+    def grow(cls,model, base_layers, new_layers, init_method='mirror'): #TODO : create an argument to specify the method of init of extra layers
+        if init_method == 'mirror':
+            with torch.no_grad():
+                for i in range(new_layers):
+                    # Copy weights from a middle layer as a reasonable initialization
+                    source_layer = model.transformer.h[base_layers - 1 - i % base_layers]
+                    target_layer = model.transformer.h[base_layers + i]
+                    target_layer.load_state_dict(source_layer.state_dict())
+                    # Slightly perturb weights to break symmetry
+                    for p in target_layer.parameters():
+                        p.add_(0.01 * torch.randn_like(p))
+        return model
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         override_args = override_args or {} # default to empty dict
         # only dropout can be overridden see more notes below
-        assert all(k == 'dropout' for k in override_args)
+        # I removed the following line to allow overriding n_layer as well  
+        #assert all(k == 'dropout' for k in override_args)
         from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
 
@@ -252,35 +275,49 @@ class GPT(nn.Module):
             'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
             'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
             'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
-            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
+            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params 
         }[model_type]
         print("forcing vocab_size=50257, block_size=1024, bias=True")
-        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
+        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints 
         config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
         config_args['bias'] = True # always True for GPT model checkpoints
         # we can override the dropout rate, if desired
+        if 'n_layer' in override_args: # TODO : Revision
+            print(f"overriding n_layer to {override_args['n_layer']}")
+            config_args['n_layer'] = override_args['n_layer']
         if 'dropout' in override_args:
             print(f"overriding dropout rate to {override_args['dropout']}")
             config_args['dropout'] = override_args['dropout']
         # create a from-scratch initialized minGPT model
         config = GPTConfig(**config_args)
-        model = GPT(config)
+        model = GPT(config) # creates random model
         sd = model.state_dict()
         sd_keys = sd.keys()
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
 
         # init a huggingface/transformers model
-        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
-        sd_hf = model_hf.state_dict()
+        model_hf = GPT2LMHeadModel.from_pretrained(model_type) 
+        sd_hf = model_hf.state_dict() #weights
 
         # copy while ensuring all of the parameters are aligned and match in names and shapes
+        # Filters out unnecessary keys from the Hugging Face state dictionary:
+        # .attn.masked_bias: A buffer used for masking during attention computation.
+        # .attn.bias: Another buffer not needed in the custom implementation.
         sd_keys_hf = sd_hf.keys()
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
-        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
-        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        # Ensures that the number of keys in the Hugging Face state dictionary matches the number of 
+        # keys in the custom model's state dictionary (excluding ignored keys).
+        
+        # I commented this out to allow for different number of layers
+        # assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}" 
+        
+        # Iterates through the keys in the Hugging Face state dictionary and copies the weights to the custom model:
+        # For transposed weights (e.g., attn.c_attn.weight), the weights are transposed before copying.
+        # For other weights, the shapes are directly matched, and the weights are copied.
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
@@ -292,9 +329,19 @@ class GPT(nn.Module):
                 assert sd_hf[k].shape == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
-
+        # TODO: when would like to grow the model, we copy the weights from the smaller 
+        # pretrained model into the larger model here and we initalize new weights from scratch
+                # Handle model growth if larger n_layer requested
+        base_layers = {'gpt2': 12, 'gpt2-medium': 24, 'gpt2-large': 36, 'gpt2-xl': 48}[model_type]
+        if 'n_layer' in override_args and override_args['n_layer'] > base_layers:
+            new_layers = override_args['n_layer'] - base_layers
+            print(f"Growing model: adding {new_layers} new layers (from {base_layers} to {override_args['n_layer']})")
+            #model = cls.grow(model, base_layers, new_layers, init_method='mirror')
+        print("Model successfully loaded and (if requested) grown.")
         return model
+    
 
+                    
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}

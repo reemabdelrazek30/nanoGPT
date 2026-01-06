@@ -29,7 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
-
+import wandb
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -61,6 +61,7 @@ n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 init_std = 0.02 # Initialization standard deviation for weights
+connection_layer = 13
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -87,19 +88,22 @@ seed = 1337
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+# device = 'cpu'
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-compile = True # use PyTorch 2.0 to compile the model to be faster
+#compile = True # use PyTorch 2.0 to compile the model to be faster
+compile = False # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
-
+print("training config:")
 assert not (never_save_checkpoint and always_save_checkpoint)
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
 if ddp:
+    print("setting up ddp...")
     init_process_group(backend=backend)
     ddp_rank = int(os.environ['RANK'])
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
@@ -114,9 +118,11 @@ if ddp:
     gradient_accumulation_steps //= ddp_world_size
 else:
     # if not ddp, we are running on a single gpu, and one process
+    print("setting up master process...")
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
+
 tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
@@ -192,6 +198,7 @@ elif init_from == 'resume':
     # create the model
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
+    print(f"Number of layers in the model: {len(model.blocks)}")
     state_dict = checkpoint['model']
     # fix the keys of the state dictionary :(
     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
@@ -205,8 +212,10 @@ elif init_from == 'resume':
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout)
+    override_args = dict(dropout=dropout,n_layer=n_layer) 
+    #override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
+    #print(f"Number of layers in the model: {model.config.n_layer}")
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
@@ -214,11 +223,20 @@ elif init_from.startswith('gpt2'):
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
+# elif block_size > model.config.block_size:
+#     print(f"Growing the model to block size {block_size}")
+#     model_args['block_size'] = block_size  # Update the checkpoint value
+#     model.grow_block_size(block_size)  # Custom method to grow the model
+#     # Initialize a new empty layer and append it to the model
+#     new_layer = GPT.Layer(model.config)  # Create a new layer based on the model's config
+#     model.transformer.h.append(new_layer)  # Append the new layer to the model
+#     model.config.n_layer += 1  # Update the number of layers in the model config
+#     print(f"Added a new layer. Total layers: {model.config.n_layer}")
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
-
+#scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
@@ -270,8 +288,9 @@ def get_lr(it):
 
 # logging
 if master_process:
+    print("setting up logging...")
     if wandb_log:
-        import wandb
+        print("initializing wandb...")
         wandb_run = wandb.init(project=wandb_project, name=wandb_run_name, config=config)
     if csv_log:
         from csv_logging import CSVLogWrapper
