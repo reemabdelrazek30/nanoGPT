@@ -14,7 +14,7 @@ eval_iters = 40
 wandb_log = True # feel free to turn on
 wandb_project = 'openwebtext-finetune'
 #wandb_run_name = 'ft-mirror-' + str(time.time()) 
-wandb_run_name = 'ft-10000-' + str(n_layer)
+wandb_run_name = 'ft-10000-' + str(n_layer) 
 
 init_from = 'gpt2' # this is the largest GPT-2 model #original
 #init_from = 'gpt2' # changed to large due to memory constraints
@@ -29,8 +29,9 @@ gradient_accumulation_steps = 32
 max_iters = 5000
 device = 'cuda'
 # finetune at constant LR
-learning_rate = 3e-5
+#learning_rate = 3e-6
 decay_lr = True
-warmup_iters = 1000 # how many steps to warm up for
-lr_decay_iters = max_iters - 100 # should be ~= max_iters per Chinchilla
-min_lr = 3e-6 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+#warmup_iters = 1000 # how many steps to warm up for
+#lr_decay_iters = max_iters - 100 # should be ~= max_iters per Chinchilla
+#min_lr = 3e-7 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+connection_layer = 13

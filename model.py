@@ -336,6 +336,20 @@ class GPT(nn.Module):
         if 'n_layer' in override_args and override_args['n_layer'] > base_layers:
             new_layers = override_args['n_layer'] - base_layers
             print(f"Growing model: adding {new_layers} new layers (from {base_layers} to {override_args['n_layer']})")
+            # ---- FREEZE PRETRAINED BASE MODEL ----
+            for param in model.parameters():
+                param.requires_grad = False
+            # unfreeze lm head (if you want to finetune vocab projection)
+            if hasattr(model, "lm_head"):
+                for p in model.lm_head.parameters():
+                    p.requires_grad = True
+            if 'n_layer' in override_args and override_args['n_layer'] > base_layers:
+                for block in model.transformer.h[base_layers:]:
+                    for p in block.parameters():
+                        p.requires_grad = True
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in model.parameters())
+            print(f"Trainable params: {trainable:,} / {total:,}")
             #model = cls.grow(model, base_layers, new_layers, init_method='mirror')
         print("Model successfully loaded and (if requested) grown.")
         return model
