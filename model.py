@@ -133,7 +133,7 @@ class GPTConfig:
     mup_input_alpha: float = 1 # Optional tunable multiplier applied to input embedding forward pass output
     mup_output_alpha: float = 1 # Optional tunable multiplier applied to output unembedding forward pass output
     connection_layer: int = None # Optional layer index to add connection from input to this layer
-    
+    connection_layer_mlp_enable: bool = False # Whether to use an MLP to transform the input before adding it to the connection layer output
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -150,6 +150,7 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        self.connection_layer_mlp = nn.Linear(config.n_embd, config.n_embd, bias=config.bias) if config.connection_layer_mlp_enable else None
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -212,10 +213,12 @@ class GPT(nn.Module):
         # for block in self.transformer.h:
         #     x = block(x) 
         connection_read = None
-        #connection_layer = 13 # 
         for i, block in enumerate(self.transformer.h):
             if self.connection_layer is not None and i == self.connection_layer:
-                x = x + connection_read 
+                if self.connection_layer_mlp is not None:
+                    x = x + self.connection_layer_mlp(connection_read)
+                else: 
+                    x = x + connection_read
             x = block(x)
             if i == 0:
                 connection_read = x
@@ -283,12 +286,18 @@ class GPT(nn.Module):
         config_args['bias'] = True # always True for GPT model checkpoints
         # we can override the dropout rate, if desired
         if 'n_layer' in override_args: # TODO : Revision
-            print(f"overriding n_layer to {override_args['n_layer']}")
+            #print(f"overriding n_layer to {override_args['n_layer']}")
             config_args['n_layer'] = override_args['n_layer']
         if 'dropout' in override_args:
-            print(f"overriding dropout rate to {override_args['dropout']}")
+            #print(f"overriding dropout rate to {override_args['dropout']}")
             config_args['dropout'] = override_args['dropout']
         # create a from-scratch initialized minGPT model
+        if 'connection_layer' in override_args:
+            print(f"overriding connection_layer to {override_args['connection_layer']}")
+            config_args['connection_layer'] = override_args['connection_layer']
+        if 'connection_layer_mlp_enable' in override_args: 
+            print(f"overriding connection_layer_mlp_enable to {override_args['connection_layer_mlp_enable']}")
+            config_args['connection_layer_mlp_enable'] = override_args['connection_layer_mlp_enable']
         config = GPTConfig(**config_args)
         model = GPT(config) # creates random model
         sd = model.state_dict()
@@ -333,6 +342,7 @@ class GPT(nn.Module):
         # pretrained model into the larger model here and we initalize new weights from scratch
                 # Handle model growth if larger n_layer requested
         base_layers = {'gpt2': 12, 'gpt2-medium': 24, 'gpt2-large': 36, 'gpt2-xl': 48}[model_type]
+        print(base_layers)
         if 'n_layer' in override_args and override_args['n_layer'] > base_layers:
             new_layers = override_args['n_layer'] - base_layers
             print(f"Growing model: adding {new_layers} new layers (from {base_layers} to {override_args['n_layer']})")
@@ -340,13 +350,17 @@ class GPT(nn.Module):
             for param in model.parameters():
                 param.requires_grad = False
             # unfreeze lm head (if you want to finetune vocab projection)
-            if hasattr(model, "lm_head"):
-                for p in model.lm_head.parameters():
-                    p.requires_grad = True
+            # if hasattr(model, "lm_head"):
+            #     for p in model.lm_head.parameters():
+            #         p.requires_grad = True
             if 'n_layer' in override_args and override_args['n_layer'] > base_layers:
+                print('here')
                 for block in model.transformer.h[base_layers:]:
                     for p in block.parameters():
                         p.requires_grad = True
+            if 'connection_layer_mlp_enable' in override_args and override_args['connection_layer_mlp_enable']:
+                for p in model.connection_layer_mlp.parameters():
+                    p.requires_grad = True
             trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
             total = sum(p.numel() for p in model.parameters())
             print(f"Trainable params: {trainable:,} / {total:,}")

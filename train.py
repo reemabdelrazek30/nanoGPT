@@ -62,6 +62,7 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 init_std = 0.02 # Initialization standard deviation for weights
 connection_layer = None 
+connection_layer_mlp_enable = False
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -195,10 +196,11 @@ elif init_from == 'resume':
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = checkpoint_model_args[k]
+    print(f"Model args: {model_args}")
     # create the model
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
-    print(f"Number of layers in the model: {len(model.blocks)}")
+    print(f"Number of layers in the model: {model}")
     state_dict = checkpoint['model']
     # fix the keys of the state dictionary :(
     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
@@ -212,7 +214,7 @@ elif init_from == 'resume':
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout,n_layer=n_layer) 
+    override_args = dict(dropout=dropout,n_layer=n_layer, connection_layer = connection_layer, connection_layer_mlp_enable = connection_layer_mlp_enable) 
     #override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     #print(f"Number of layers in the model: {model.config.n_layer}")
@@ -239,7 +241,7 @@ model.to(device)
 scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-if init_from == 'resume':
+if init_from == 'resume' and eval_only == False:
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory
 
@@ -306,14 +308,15 @@ raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 coord_check_dict = None
 while True:
-
+    #print(f"iter_num: {iter_num}, local_iter_num: {local_iter_num}")
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr * param_group.get('lr_scale', 1.0)
-
+    #print(eval_interval)
     # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0 and master_process:
+    if (iter_num % eval_interval == 0 and master_process) or eval_only:
+        print("evaluating loss...")
         losses = estimate_loss()
         if np.isnan(losses['train']):
             raise Exception('NaN loss')
@@ -346,7 +349,8 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-    if iter_num == 0 and eval_only:
+    #if iter_num == 0 and eval_only:
+    if eval_only:
         break
 
     if mup_enable_coord_check_logging:
