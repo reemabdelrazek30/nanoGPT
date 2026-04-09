@@ -63,6 +63,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 init_std = 0.02 # Initialization standard deviation for weights
 connection_layer = None 
 connection_layer_mlp_enable = False
+connection_read_layer = 0
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -214,7 +215,7 @@ elif init_from == 'resume':
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout,n_layer=n_layer, connection_layer = connection_layer, connection_layer_mlp_enable = connection_layer_mlp_enable) 
+    override_args = dict(dropout=dropout,n_layer=n_layer, connection_layer = connection_layer, connection_layer_mlp_enable = connection_layer_mlp_enable, connection_read_layer = connection_read_layer) 
     #override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     #print(f"Number of layers in the model: {model.config.n_layer}")

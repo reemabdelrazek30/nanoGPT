@@ -134,6 +134,7 @@ class GPTConfig:
     mup_output_alpha: float = 1 # Optional tunable multiplier applied to output unembedding forward pass output
     connection_layer: int = None # Optional layer index to add connection from input to this layer
     connection_layer_mlp_enable: bool = False # Whether to use an MLP to transform the input before adding it to the connection layer output
+    connection_read_layer: int = 0
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -142,6 +143,7 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         self.connection_layer = config.connection_layer
+        self.connection_read_layer = config.connection_read_layer 
         print("initializing GPT model with config layers:",config.n_layer)
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -220,7 +222,7 @@ class GPT(nn.Module):
                 else: 
                     x = x + connection_read
             x = block(x)
-            if i == 0:
+            if i == self.connection_read_layer:
                 connection_read = x
         x = self.transformer.ln_f(x)
 
@@ -298,6 +300,9 @@ class GPT(nn.Module):
         if 'connection_layer_mlp_enable' in override_args: 
             print(f"overriding connection_layer_mlp_enable to {override_args['connection_layer_mlp_enable']}")
             config_args['connection_layer_mlp_enable'] = override_args['connection_layer_mlp_enable']
+        if 'connection_read_layer' in override_args: 
+            print(f"overriding connection_read_layer to {override_args['connection_read_layer']}")
+            config_args['connection_read_layer'] = override_args['connection_read_layer']
         config = GPTConfig(**config_args)
         model = GPT(config) # creates random model
         sd = model.state_dict()
