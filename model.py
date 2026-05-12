@@ -135,6 +135,7 @@ class GPTConfig:
     connection_layer: int = None # Optional layer index to add connection from input to this layer
     connection_layer_mlp_enable: bool = False # Whether to use an MLP to transform the input before adding it to the connection layer output
     connection_read_layer: int = 0
+    connection_read_layers_list: list = None # Optional list of layer indices from which to read the input for the connection (if connection_layer is not None)
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -143,6 +144,7 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
         self.connection_layer = config.connection_layer
+        self.connection_read_layers_list = config.connection_read_layers_list
         self.connection_read_layer = config.connection_read_layer 
         print("initializing GPT model with config layers:",config.n_layer)
         self.transformer = nn.ModuleDict(dict(
@@ -152,7 +154,9 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.connection_layer_mlp = nn.Linear(config.n_embd, config.n_embd, bias=config.bias) if config.connection_layer_mlp_enable else None
+        # self.connection_layer_mlp = nn.Linear(config.n_embd * len(self.connection_read_layer_list), config.n_embd, bias=config.bias) if config.connection_layer_mlp_enable else None
+        k = len(self.connection_read_layers_list) if config.connection_layer_mlp_enable and config.connection_read_layers_list is not None else 1
+        self.connection_layer_mlp = nn.Linear(k * config.n_embd, config.n_embd, bias=config.bias) if config.connection_layer_mlp_enable else None
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -214,16 +218,24 @@ class GPT(nn.Module):
             ### End muP code ###
         # for block in self.transformer.h:
         #     x = block(x) 
-        connection_read = None
+        connection_read = [] 
         for i, block in enumerate(self.transformer.h):
             if self.connection_layer is not None and i == self.connection_layer:
                 if self.connection_layer_mlp is not None:
-                    x = x + self.connection_layer_mlp(connection_read)
+                    if self.connection_read_layers_list is not None:
+                    #print('using connection list:', self.connection_read_layers_list)
+                        connection_read_concatenated = torch.cat(connection_read, dim=-1)
+                    #print(f"connection read concatenated shape: {connection_read_concatenated.shape}")
+                        x = x + self.connection_layer_mlp(connection_read_concatenated)
+                    else:
+                        x = x + self.connection_layer_mlp(connection_read[-1])
                 else: 
-                    x = x + connection_read
+                    x = x + connection_read[-1]
             x = block(x)
-            if i == self.connection_read_layer:
-                connection_read = x
+            if i in self.connection_read_layers_list:
+                #connection_read = x 
+                #print(f"appending connection read from layer {i}")
+                connection_read.append(x)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -303,6 +315,9 @@ class GPT(nn.Module):
         if 'connection_read_layer' in override_args: 
             print(f"overriding connection_read_layer to {override_args['connection_read_layer']}")
             config_args['connection_read_layer'] = override_args['connection_read_layer']
+        if 'connection_read_layers_list' in override_args: 
+            print(f"overriding connection_read_layers_list to {override_args['connection_read_layers_list']}")
+            config_args['connection_read_layers_list'] = override_args['connection_read_layers_list']
         config = GPTConfig(**config_args)
         model = GPT(config) # creates random model
         sd = model.state_dict()
@@ -347,32 +362,32 @@ class GPT(nn.Module):
         # pretrained model into the larger model here and we initalize new weights from scratch
                 # Handle model growth if larger n_layer requested
         base_layers = {'gpt2': 12, 'gpt2-medium': 24, 'gpt2-large': 36, 'gpt2-xl': 48}[model_type]
-        print(base_layers)
+        print(base_layers)        
         if 'n_layer' in override_args and override_args['n_layer'] > base_layers:
+            # ---- FREEZE PRETRAINED BASE MODEL ---
+            print(override_args['freeze'])
+            #exit()
+            if 'freeze' in override_args and override_args['freeze']:
+                print("Freezing pretrained model parameters...")
+                for param in model.parameters():
+                    param.requires_grad = False             
             new_layers = override_args['n_layer'] - base_layers
             print(f"Growing model: adding {new_layers} new layers (from {base_layers} to {override_args['n_layer']})")
-            # ---- FREEZE PRETRAINED BASE MODEL ----
-            for param in model.parameters():
-                param.requires_grad = False
             # unfreeze lm head (if you want to finetune vocab projection)
             # if hasattr(model, "lm_head"):
             #     for p in model.lm_head.parameters():
             #         p.requires_grad = True
-            if 'n_layer' in override_args and override_args['n_layer'] > base_layers:
-                print('here')
-                for block in model.transformer.h[base_layers:]:
-                    for p in block.parameters():
-                        p.requires_grad = True
+            for block in model.transformer.h[base_layers:]:
+                for p in block.parameters():
+                    p.requires_grad = True
             if 'connection_layer_mlp_enable' in override_args and override_args['connection_layer_mlp_enable']:
                 for p in model.connection_layer_mlp.parameters():
                     p.requires_grad = True
             trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
             total = sum(p.numel() for p in model.parameters())
             print(f"Trainable params: {trainable:,} / {total:,}")
-            #model = cls.grow(model, base_layers, new_layers, init_method='mirror')
         print("Model successfully loaded and (if requested) grown.")
         return model
-    
 
                     
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):

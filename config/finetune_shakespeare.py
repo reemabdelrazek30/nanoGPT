@@ -7,14 +7,14 @@ import torch
 #print(torch.cuda.is_available()) # True now!
 #print(torch.cuda.get_device_name(0))  # Your AMD GPU name
 #exit()
-n_layer=20
+n_layer=13
 out_dir = 'out-shakespeare'
 eval_interval = 5
 eval_iters = 40
-wandb_log = True # feel free to turn on
-wandb_project = 'shakespeare-mirror'
+#wandb_log = True # feel free to turn on
+#wandb_project = 'shakespeare-mirror'
 #wandb_run_name = 'ft-mirror-' + str(time.time()) 
-wandb_run_name = 'ft-mirror- ' + str(n_layer)
+#wandb_run_name = 'ft-mirror- ' + str(n_layer)
 
 dataset = 'shakespeare'
 init_from = 'gpt2' # this is the largest GPT-2 model #original
@@ -32,4 +32,4 @@ device = 'cpu'
 # finetune at constant LR
 learning_rate = 3e-5
 decay_lr = False
-
+connection_layer = 12

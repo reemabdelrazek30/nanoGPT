@@ -22,7 +22,8 @@ import math
 import pickle
 from contextlib import nullcontext
 from functools import partial
-
+from collections import deque
+import numpy as np
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -64,6 +65,8 @@ init_std = 0.02 # Initialization standard deviation for weights
 connection_layer = None 
 connection_layer_mlp_enable = False
 connection_read_layer = 0
+connection_read_layers_list = [] # which layers to add connections to (1-indexed)
+freeze = False # whether to freeze the pretrained layers (except the connection layers) when initializing from pretrained weights
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -187,6 +190,7 @@ if init_from == 'scratch':
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
+    
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -211,11 +215,12 @@ elif init_from == 'resume':
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
+    best_val_loss = checkpoint['best_val_loss'
+                               ]
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout,n_layer=n_layer, connection_layer = connection_layer, connection_layer_mlp_enable = connection_layer_mlp_enable, connection_read_layer = connection_read_layer) 
+    override_args = dict(dropout=dropout,n_layer=n_layer, connection_layer = connection_layer, connection_layer_mlp_enable = connection_layer_mlp_enable, connection_read_layer = connection_read_layer, connection_read_layers_list = connection_read_layers_list, freeze = freeze) 
     #override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     #print(f"Number of layers in the model: {model.config.n_layer}")
@@ -301,6 +306,43 @@ if master_process:
             pass
         csv_logger = CSVLogWrapper(log, config=config, out_dir=out_dir, flush_every=flush_every)
 
+def compute_gradient_signal(model):
+    total_norm = 0.0
+    count = 0
+
+    for p in model.parameters():
+        if p.grad is not None:
+            total_norm += p.grad.data.norm(2).item() 
+            # TODO we can also other metrics like the parameters norm to get a better picture of the training dynamics
+            count += 1
+
+    return total_norm / max(count, 1)
+
+class GradientSignalTracker:
+    def __init__(self, window=200, alpha=0.7, warmup=100):
+        self.history = deque(maxlen=window)
+        self.alpha = alpha
+        self.baseline = None
+        self.warmup = warmup
+        self.steps = 0
+
+    def update(self, signal):
+        self.steps += 1
+
+        # ignore early noisy phase
+        if self.steps < self.warmup:
+            return False
+
+        self.history.append(signal)
+
+        if len(self.history) == self.history.maxlen and self.baseline is None:
+            self.baseline = np.mean(self.history)
+
+        if self.baseline is None:
+            return False
+
+        return signal < self.alpha * self.baseline
+    
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
@@ -308,6 +350,8 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 coord_check_dict = None
+tracker = GradientSignalTracker(window=200, alpha=0.7, warmup=100)
+gradient_triggered = False
 while True:
     #print(f"iter_num: {iter_num}, local_iter_num: {local_iter_num}")
     # determine and set the learning rate for this iteration
@@ -326,6 +370,8 @@ while True:
             "iter": iter_num,
             "train/loss": losses['train'],
             "val/loss": losses['val'],
+            "grad_signal_baseline": tracker.baseline if tracker.baseline else 0,
+            'grad_signal':tracker.history[-1] if len(tracker.history) > 0 else None,
             "lr": lr,
             "mfu": running_mfu*100, # convert to percentage
         }
@@ -393,6 +439,13 @@ while True:
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+    # ---- Gradient signal computation ----
+    hidden_dim = raw_model.config.n_embd
+    grad_signal = compute_gradient_signal(model) /(hidden_dim ** 0.5)
+    trigger = tracker.update(grad_signal)
+    if trigger and master_process:
+        print(f"[Iter {iter_num}] ⚠️ Capacity saturation detected! Signal={grad_signal:.6f}")
+        gradient_triggered = True
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
@@ -421,7 +474,9 @@ while True:
     if mup_enable_coord_check_logging:
         for handle in coord_check_handles:
             handle.remove()
-
+    # if gradient_triggered and master_process:
+    #     print(f"Triggered: {gradient_triggered}")
+    #     break
     # termination conditions
     if iter_num > max_iters:
         break

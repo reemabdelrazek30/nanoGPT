@@ -7,4 +7,5 @@ batch_size = 8
 eval_iters = 500 # use more iterations to get good estimate
 eval_only = True
 wandb_log = False
-init_from = 'gpt2-medium'
+init_from = 'resume'
+out_dir = 'out-openwebtext13'
