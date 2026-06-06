@@ -1,11 +1,10 @@
 from datetime import datetime
 import torch
 from pathlib import Path
-# 18 layers, freeze, connection 0-6, MLP, eval every 1000 iters, eval 500 iters, batch size 12, gradient accumulation steps 40, max iters 20000, learning rate 3e-6, decay lr, warmup iters 1000, lr decay iters 19000, min lr 3e-7
 name = Path(__file__).stem
 now = datetime.now()
-timestamp = now.strftime("%Y-%m-%d")
-out_name = f"{timestamp}_connection_list_0_6"
+timestamp = now.strftime("%Y-%m-%d_%H")
+out_name = f"{timestamp}_18_layers_freeze_connection_0_6_mlp_lrx10"
 n_layer= 18
 out_dir = out_name
 eval_interval = 1000
@@ -19,7 +18,7 @@ batch_size = 12
 gradient_accumulation_steps = 40
 max_iters = 20000
 device = 'cuda'
-learning_rate = 3e-6
+learning_rate = 3e-6 * 0.1
 decay_lr = True
 connection_layer = 12
 connection_layer_mlp_enable = True

@@ -1,10 +1,10 @@
 from datetime import datetime
 import torch
 from pathlib import Path
-# 18 layers, freeze, connection 0-6, MLP, eval every 1000 iters, eval 500 iters, batch size 12, gradient accumulation steps 40, max iters 20000, learning rate 3e-6, decay lr, warmup iters 1000, lr decay iters 19000, min lr 3e-7
+# 18 layers, freeze, connection 0-6, No MLP, eval every 1000 iters, eval 500 iters, batch size 12, gradient accumulation steps 40, max iters 20000, learning rate 3e-6, decay lr, warmup iters 1000, lr decay iters 19000, min lr 3e-7
 name = Path(__file__).stem
 now = datetime.now()
-timestamp = now.strftime("%Y-%m-%d")
+timestamp = now.strftime("%Y-%m-%d_%H")
 out_name = f"{timestamp}_connection_list_0_6"
 n_layer= 18
 out_dir = out_name
@@ -22,8 +22,8 @@ device = 'cuda'
 learning_rate = 3e-6
 decay_lr = True
 connection_layer = 12
-connection_layer_mlp_enable = True
-connection_read_layers_list = [0,6]
+connection_layer_mlp_enable = False
+connection_read_layers_list = [0,2,4,6,8,10,12,14,]
 freeze = True
 warmup_iters = 1000 # how many steps to warm up for
 lr_decay_iters = max_iters - 100 # should be ~= max_iters per Chinchilla
