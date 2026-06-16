@@ -16,6 +16,7 @@ max_iters = 10000
 device = 'cuda'
 learning_rate = 3e-6
 decay_lr = True
+#freeze = True
 warmup_iters = 1000 # how many steps to warm up for
 lr_decay_iters = max_iters - 1000 # should be ~= max_iters per Chinchilla
 min_lr = 3e-7 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla

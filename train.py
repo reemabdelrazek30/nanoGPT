@@ -343,54 +343,6 @@ class GradientSignalTracker:
 
         return signal < self.alpha * self.baseline
     
-# def compute_grad_norm(  # pylint: disable=no-self-use
-#     self, trainer: Trainer, model: torch.nn.Module, use_prod=False
-# ):
-#     """Compute the model wise and per layer norm of the gradients."""
-#     params_grad_norm = torch.tensor(0.0).to(model.device)
-#     for name, buffer in get_upegsqnorm_buffers(model):
-#         if "bias" not in name:
-#             if use_prod:
-#                 pegsqnorm = torch.prod(buffer)
-#             else:
-#                 pegsqnorm = torch.exp(torch.sum(torch.log(buffer)))
-#             name = name.replace("_upegsqnorm", "")
-#             summarize_scalar("pegsqnorm/" + name, pegsqnorm)
-#             buffer.zero_()  # clear the buffer
-#     for name, param in model.named_parameters():
-#         if param.grad is not None:
-#             param_grad_norm_sq = torch.sum(torch.pow(param.grad, 2.0))
-#             summarize_scalar("gsqnorm/" + name, param_grad_norm_sq)
-#             params_grad_norm += param_grad_norm_sq
-#     params_grad_norm = torch.sqrt(params_grad_norm)
-
-#     trainer.log_metrics(model_wise_grad_norm=params_grad_norm)
-
-#     per_layer_grad_norm = {}
-#     layer_pattern = re.compile(r".*(layers\.)(\d+)(\.).*")
-#     for name, param in model.named_parameters():
-#         if param.grad is None:
-#             continue
-#         # get a match if module name contains `layers.i.0` where i is layer num
-#         match = layer_pattern.match(name)
-#         if match:
-#             layer_id = match.group(2)
-#             if layer_id not in per_layer_grad_norm:
-#                 per_layer_grad_norm[layer_id] = torch.tensor(0.0).to(
-#                     model.device
-#                 )
-#             per_layer_grad_norm[layer_id] += torch.pow(
-#                 torch.norm(param.grad), 2.0
-#             )
-
-#     trainer.log_metrics(
-#         **{
-#             f"per_layer_grad_norm/layer_{layer_id}": torch.sqrt(
-#                 per_layer_grad_norm[layer_id]
-#             )
-#             for layer_id in per_layer_grad_norm
-#         }
-#     )   
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
@@ -494,45 +446,7 @@ while True:
     if trigger and master_process:
         print(f"[Iter {iter_num}] ⚠️ Capacity saturation detected! Signal={grad_signal:.6f}")
         gradient_triggered = True
-        
-    # ---- Gradient norm computation ----
-    if iter_num % log_interval == 0 and master_process:
-        # Unscale before reading grads (needed if using fp16 scaler)
-        if grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-        
-        # Model-wise grad norm
-        params_grad_norm_sq = torch.tensor(0.0, device=device)
-        per_layer_grad_norm = {}
-        layer_pattern = re.compile(r".*(layers\.)(\d+)(\.).*")
-
-        for name, param in raw_model.named_parameters():
-            if param.grad is None:
-                continue
-            param_grad_norm_sq = torch.sum(torch.pow(param.grad, 2.0))
-            params_grad_norm_sq += param_grad_norm_sq
-
-            match = layer_pattern.match(name)
-            if match:
-                layer_id = match.group(2)
-                per_layer_grad_norm.setdefault(layer_id, torch.tensor(0.0, device=device))
-                per_layer_grad_norm[layer_id] += torch.pow(torch.norm(param.grad), 2.0)
-
-        model_wise_grad_norm = torch.sqrt(params_grad_norm_sq).item()
-
-        grad_norm_log = {
-            "grad_norm/model_wise": model_wise_grad_norm,
-            **{
-                f"grad_norm/layer_{layer_id}": torch.sqrt(per_layer_grad_norm[layer_id]).item()
-                for layer_id in per_layer_grad_norm
-            }
-        }
-        if wandb_log:
-            wandb_run.log({"iter": iter_num, **grad_norm_log})
-        if csv_log:
-            csv_logger.log({"iter": iter_num, **grad_norm_log})
-        
-        print(f"  model_wise_grad_norm: {model_wise_grad_norm:.4f}")
+    
         # ---- Gradient norm computation ----
         if iter_num % log_interval == 0 and master_process:
             # Unscale before reading grads (needed if using fp16 scaler)
@@ -556,7 +470,9 @@ while True:
                     per_layer_grad_norm.setdefault(layer_id, torch.tensor(0.0, device=device))
                     per_layer_grad_norm[layer_id] += torch.pow(torch.norm(param.grad), 2.0)
 
-            model_wise_grad_norm = torch.sqrt(params_grad_norm_sq).item()
+            # count total gradient elements (only params with non-zero grads)
+            num_grad_elements = sum(p.grad.numel() for p in raw_model.parameters() if p.grad is not None)
+            model_wise_grad_norm = torch.sqrt(params_grad_norm_sq / num_grad_elements).item()
 
             grad_norm_log = {
                 "grad_norm/model_wise": model_wise_grad_norm,
